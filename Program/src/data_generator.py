@@ -63,29 +63,29 @@ def generate_user_profiles(num_users, random_state):
         user_id = f"U{i + 1:04d}"
 
         if utype == "regular":
-            # 规律型：午餐和晚餐都高概率出现
-            lunch_prob = rng.uniform(0.75, 0.95)
-            dinner_prob = rng.uniform(0.65, 0.85)
+            # 规律型：午餐高概率，晚餐中等偏高（午餐客流通常比晚餐多20-40%）
+            lunch_prob = rng.uniform(0.85, 0.95)
+            dinner_prob = rng.uniform(0.50, 0.70)
             preferred = rng.choice(window_ids, size=rng.randint(2, 4), replace=False).tolist()
             price_offset = rng.uniform(-0.05, 0.05)
         elif utype == "moderate":
-            # 适中型：中等概率出现
-            lunch_prob = rng.uniform(0.45, 0.70)
-            dinner_prob = rng.uniform(0.35, 0.60)
+            # 适中型：中等概率，午餐比晚餐更常出现
+            lunch_prob = rng.uniform(0.45, 0.65)
+            dinner_prob = rng.uniform(0.30, 0.50)
             preferred = rng.choice(window_ids, size=rng.randint(3, 6), replace=False).tolist()
             price_offset = rng.uniform(-0.03, 0.08)
         elif utype == "occasional":
-            # 偶尔型：低概率出现
-            lunch_prob = rng.uniform(0.15, 0.35)
-            dinner_prob = rng.uniform(0.10, 0.30)
+            # 偶尔型：低概率
+            lunch_prob = rng.uniform(0.10, 0.25)
+            dinner_prob = rng.uniform(0.05, 0.18)
             preferred = rng.choice(window_ids, size=rng.randint(3, 8), replace=False).tolist()
             price_offset = rng.uniform(-0.08, 0.03)
         else:  # high_spender
-            # 高消费型：偏好高价位窗口
-            lunch_prob = rng.uniform(0.55, 0.80)
-            dinner_prob = rng.uniform(0.50, 0.75)
+            # 高消费型：低频次但高消费（偶发性高消费）
+            lunch_prob = rng.uniform(0.25, 0.45)
+            dinner_prob = rng.uniform(0.20, 0.40)
             preferred = ["W03", "W04", "W08"]  # 小炒、麻辣烫、特色档口
-            price_offset = rng.uniform(0.10, 0.25)
+            price_offset = rng.uniform(0.15, 0.30)
 
         profiles[user_id] = {
             "type": utype,
@@ -98,7 +98,7 @@ def generate_user_profiles(num_users, random_state):
     return profiles
 
 
-def generate_traffic_multiplier(hour, meal_period):
+def generate_traffic_multiplier(hour, meal_period, rng):
     """生成某个时段内的客流波动系数
 
     模拟下课高峰、逐渐回落等真实模式
@@ -106,6 +106,7 @@ def generate_traffic_multiplier(hour, meal_period):
     Args:
         hour: 小时
         meal_period: "lunch" 或 "dinner"
+        rng: numpy随机状态（确保可复现性）
 
     Returns:
         float: 客流倍率
@@ -119,15 +120,19 @@ def generate_traffic_multiplier(hour, meal_period):
     dist_from_mid = abs(hour + 0.5 - mid_h)
     half_range = (end_h - start_h) / 2
     if dist_from_mid < half_range * 0.3:
-        return np.random.uniform(1.1, 1.4)  # 高峰期
+        return rng.uniform(1.1, 1.4)  # 高峰期
     elif dist_from_mid < half_range * 0.7:
-        return np.random.uniform(0.8, 1.1)  # 平峰
+        return rng.uniform(0.8, 1.1)  # 平峰
     else:
-        return np.random.uniform(0.5, 0.8)  # 边缘时段
+        return rng.uniform(0.5, 0.8)  # 边缘时段
 
 
 def generate_transactions_for_day(date, user_profiles, rng):
     """生成某一天的所有交易记录
+
+    核心逻辑：每个用户每餐最多只消费一次（在一顿饭中选择一个窗口）
+    先确定用户是否消费（根据lunch_prob/dinner_prob），
+    再根据偏好窗口分布选择实际消费的窗口
 
     Args:
         date: datetime.date
@@ -145,55 +150,72 @@ def generate_transactions_for_day(date, user_profiles, rng):
     weekday_factor = {0: 1.10, 1: 1.00, 2: 1.00, 3: 0.98, 4: 0.92}.get(weekday, 1.0)
 
     for meal_key, meal_info in MEAL_PERIODS.items():
-        for hour in range(meal_info["start"], meal_info["end"]):
-            traffic_mult = generate_traffic_multiplier(hour, meal_key)
+        # ========== 修复P0: 改为用户→餐时段→窗口 ==========
+        # 第一步：遍历每个用户，确定是否在此餐时段消费
+        for user_id, profile in user_profiles.items():
+            prob = profile["lunch_prob"] if meal_key == "lunch" else profile["dinner_prob"]
 
-            for window_id, wconfig in WINDOW_CONFIG.items():
-                # 计算该窗口该小时的基础客流量
-                base_traffic = BASE_TRAFFIC_PER_WINDOW * wconfig["weight"]
-                traffic = int(base_traffic * traffic_mult * weekday_factor)
-                traffic = max(1, rng.poisson(traffic))
+            if rng.random() >= prob:
+                continue  # 用户今天此餐不消费
 
-                # 随机选择用户（有消费概率）
-                candidate_users = list(user_profiles.keys())
-                rng.shuffle(candidate_users)
+            # 第二步：选择一个消费窗口（按偏好权重）
+            window_id = _select_window_by_preference(profile, WINDOW_CONFIG, rng)
 
-                count = 0
-                for user_id in candidate_users:
-                    if count >= traffic:
-                        break
+            # 第三步：生成交易记录
+            hour = rng.randint(meal_info["start"], meal_info["end"])
+            minute = rng.randint(0, 60)
+            second = rng.randint(0, 60)
+            trans_time = f"{date_str} {hour:02d}:{minute:02d}:{second:02d}"
 
-                    profile = user_profiles[user_id]
-                    prob = profile["lunch_prob"] if meal_key == "lunch" else profile["dinner_prob"]
+            # 生成消费金额
+            wconfig = WINDOW_CONFIG[window_id]
+            low, high = wconfig["price_range"]
+            price = rng.uniform(low, high)
+            price = price * (1 + profile["price_offset"])
+            price = round(max(low * 0.8, min(high * 1.3, price)), 1)
 
-                    # 窗口偏好：首选窗口概率更高
-                    if window_id in profile["preferred_windows"]:
-                        prob *= 1.5
-
-                    if rng.random() < prob * 0.3:  # 0.3避免所有人都出现
-                        # 生成交易时间（精确到分钟秒）
-                        minute = rng.randint(0, 60)
-                        second = rng.randint(0, 60)
-                        trans_time = f"{date_str} {hour:02d}:{minute:02d}:{second:02d}"
-
-                        # 生成消费金额
-                        low, high = wconfig["price_range"]
-                        price = rng.uniform(low, high)
-                        price = price * (1 + profile["price_offset"])
-                        price = round(max(low * 0.8, min(high * 1.3, price)), 1)
-
-                        transactions.append({
-                            "transaction_id": f"T{len(transactions) + 1:08d}",
-                            "card_id": user_id,
-                            "window_id": window_id,
-                            "window_name": wconfig["name"],
-                            "transaction_time": trans_time,
-                            "amount": price,
-                            "meal_period": meal_info["label"],
-                        })
-                        count += 1
+            transactions.append({
+                "transaction_id": f"T{len(transactions) + 1:08d}",
+                "card_id": user_id,
+                "window_id": window_id,
+                "window_name": wconfig["name"],
+                "transaction_time": trans_time,
+                "amount": price,
+                "meal_period": meal_info["label"],
+            })
 
     return transactions
+
+
+def _select_window_by_preference(profile, window_config, rng):
+    """根据用户偏好选择消费窗口
+
+    首选窗口有更高概率被选择，但非首选窗口也可能被选择（用户多样性）
+
+    Args:
+        profile: 用户画像字典
+        window_config: 窗口配置字典
+        rng: 随机状态
+
+    Returns:
+        str: 选择的窗口ID
+    """
+    preferred = profile["preferred_windows"]
+    all_windows = list(window_config.keys())
+
+    # 计算每个窗口的权重：首选窗口权重更高
+    weights = []
+    for w in all_windows:
+        if w in preferred:
+            weights.append(3.0)  # 首选窗口权重3
+        else:
+            weights.append(0.5)  # 非首选窗口权重0.5
+
+    # 归一化
+    total = sum(weights)
+    weights = [w / total for w in weights]
+
+    return rng.choice(all_windows, p=weights)
 
 
 def generate_canteen_data(
