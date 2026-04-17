@@ -89,7 +89,7 @@ def render_fig(fig_path, caption=None):
 
 
 # ============ 侧边栏 ============
-st.sidebar.title(f":knife_spoon: {CANTEEN_NAME}")
+st.sidebar.title(f"🍴 {CANTEEN_NAME}")
 st.sidebar.markdown("---")
 st.sidebar.markdown("**分析模块**")
 
